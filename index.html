@@ -67,6 +67,10 @@
   .who{font-size:11px;text-transform:uppercase;letter-spacing:.09em;
     color:var(--muted);margin-bottom:7px}
   .ja{font-size:20px;line-height:1.75;margin:0 0 3px}
+  .ja:has(ruby){line-height:2.1}
+  ruby{ruby-position:over}
+  rt{font-size:.5em;color:var(--muted);font-weight:400;letter-spacing:.02em}
+  button.ghost.off{opacity:.45}
   .en{font-size:14px;color:var(--muted);margin:0 0 3px}
   .turn.me .ja{font-size:16px}
   .turn.me{opacity:.82}
@@ -89,6 +93,7 @@
     <option>Zephyr</option><option>Puck</option><option>Charon</option>
     <option>Kore</option><option>Fenrir</option><option>Aoede</option>
   </select>
+  <button id="rubyBtn" class="ghost" title="Show furigana above kanji">ふりがな</button>
   <button id="keyBtn" class="ghost" title="Set or replace the API key stored in this browser">Key</button>
 </header>
 
@@ -169,6 +174,56 @@ function turnEl(who,label){
   logEl.prepend(d);
   return d;
 }
+// Furigana runs as a SEPARATE text request after a turn finishes, so it never
+// sits in front of the voice stream. The conversation never waits on it.
+let rubyOn = true;
+try{ rubyOn = localStorage.getItem('ruby') !== 'off'; }catch{}
+
+function paintRubyBtn(){
+  $('rubyBtn').classList.toggle('off', !rubyOn);
+}
+$('rubyBtn').onclick = ()=>{
+  rubyOn = !rubyOn;
+  try{ localStorage.setItem('ruby', rubyOn ? 'on' : 'off'); }catch{}
+  paintRubyBtn();
+};
+paintRubyBtn();
+
+// Turns "元気[げんき]です" into <ruby>元気<rt>げんき</rt></ruby>です
+function bracketsToRuby(s){
+  const esc = t => t.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  return esc(s).replace(/([一-鿿々]+)\[([ぁ-ゖー]+)\]/g,
+    (_,k,r)=>'<ruby>'+k+'<rt>'+r+'</rt></ruby>');
+}
+
+async function addFurigana(el){
+  if(!rubyOn) return;
+  const key = getKey(); if(!key) return;
+  const lines = [...el.querySelectorAll('.ja')].map(p=>p.textContent).join('\n');
+  if(!lines.trim() || !/[一-鿿]/.test(lines)) return;   // no kanji, nothing to do
+  try{
+    const res = await fetch(
+      'https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent',
+      { method:'POST',
+        headers:{'Content-Type':'application/json','X-goog-api-key':key},
+        body: JSON.stringify({
+          contents:[{parts:[{text:
+            'Add hiragana readings to every kanji word in the Japanese text below. '+
+            'Put each reading in square brackets immediately after its kanji, like 元気[げんき]. '+
+            'Change nothing else: keep all kana, punctuation and line breaks exactly as they are. '+
+            'Reply with the text only, no explanation.\n\n'+lines}]}],
+          generationConfig:{temperature:0}
+        }) });
+    if(!res.ok) return;
+    const j = await res.json();
+    const out = j?.candidates?.[0]?.content?.parts?.[0]?.text;
+    if(!out) return;
+    const got = out.trim().split('\n').filter(t=>t.trim());
+    const ps = [...el.querySelectorAll('.ja')];
+    ps.forEach((p,i)=>{ if(got[i]) p.innerHTML = bracketsToRuby(got[i].trim()); });
+  }catch{ /* furigana is a nicety; never disturb the conversation */ }
+}
+
 function render(el, text){
   [...el.querySelectorAll('.ja,.en')].forEach(n=>n.remove());
   text.split('\n').forEach(line=>{
@@ -297,7 +352,10 @@ async function start(){
     if(parts) for(const p of parts){
       if(p.inlineData && p.inlineData.data) playPCM(p.inlineData.data);
     }
-    if(sc.turnComplete){ curModel=null; curUser=null; }
+    if(sc.turnComplete){
+      if(curModel) addFurigana(curModel);   // fire-and-forget, not awaited
+      curModel=null; curUser=null;
+    }
   };
 
   ws.onerror=()=>showError('WebSocket error. Check the key, or try another model in the dropdown.');

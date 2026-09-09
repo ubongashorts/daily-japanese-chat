@@ -71,6 +71,14 @@
   ruby{ruby-position:over}
   rt{font-size:.5em;color:var(--muted);font-weight:400;letter-spacing:.02em}
   button.ghost.off{opacity:.45}
+  .who{display:flex;align-items:center;gap:8px}
+  button.play{font:inherit;font-size:10px;line-height:1;padding:0;cursor:pointer;
+    width:19px;height:19px;border-radius:50%;border:1px solid var(--line);
+    background:var(--panel);color:var(--muted);flex:none}
+  button.play:hover{color:var(--accent);border-color:var(--accent)}
+  button.play:active{transform:translateY(1px)}
+  button.play.busy{opacity:.5;animation:pulseDot 1s ease-in-out infinite}
+  @keyframes pulseDot{0%,100%{opacity:.35}50%{opacity:.8}}
   .en{font-size:14px;color:var(--muted);margin:0 0 3px}
   .turn.me .ja{font-size:16px}
   .turn.me{opacity:.82}
@@ -314,6 +322,186 @@ async function fetchReadings(key, src, want){
   return got;
 }
 
+/* ---- replay -----------------------------------------------------------------
+   Her side plays back the audio she actually sent, kept as raw PCM. Your side
+   has no recording of her saying your sentence, so it is read by whatever
+   Japanese voice the device itself provides — free, offline, and absent on a
+   device with no Japanese voice installed, in which case the button is simply
+   not offered.                                                              */
+const KEEP_AUDIO_TURNS = 20;
+let turnAudio = [];            // PCM for the reply currently arriving
+const audioTurns = [];         // turns still holding audio, oldest first
+let replayCtx = null;
+
+function replayContext(){
+  if(playCtx && playCtx.state !== 'closed') return playCtx;
+  if(!replayCtx || replayCtx.state === 'closed')
+    replayCtx = new (window.AudioContext || window.webkitAudioContext)({sampleRate: OUT_RATE});
+  return replayCtx;
+}
+
+function addPlayButton(el, label, fn){
+  const who = el.querySelector('.who');
+  if(!who || who.querySelector('.play')) return;
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.className = 'play';
+  b.title = label;
+  b.setAttribute('aria-label', label);
+  b.textContent = '▶';
+  b.onclick = ()=>fn(b);
+  who.appendChild(b);
+}
+
+function keepHerVoice(el){
+  if(!turnAudio.length) return;
+  el.__audio = turnAudio;
+  turnAudio = [];
+  audioTurns.push(el);
+  while(audioTurns.length > KEEP_AUDIO_TURNS){        // let old audio go
+    const old = audioTurns.shift();
+    delete old.__audio;
+    const b = old.querySelector('.play');
+    if(b) b.remove();
+  }
+  addPlayButton(el, 'Play her voice again', ()=>{
+    const ctx = replayContext();
+    if(ctx.state === 'suspended') ctx.resume().catch(()=>{});
+    playStored(el);
+  });
+}
+
+function playStored(el){
+  const chunks = el.__audio;
+  if(!chunks || !chunks.length) return;
+  const ctx = replayContext();
+  const total = chunks.reduce((n,c)=>n+c.length, 0);
+  const buf = ctx.createBuffer(1, total, OUT_RATE);
+  const ch = buf.getChannelData(0);
+  let at = 0;
+  for(const c of chunks){
+    for(let i=0;i<c.length;i++) ch[at+i] = c[i]/32768;
+    at += c.length;
+  }
+  playBuffer(buf);
+}
+
+// The device's own Japanese voice, if it has one at all.
+let jaVoice = null;
+function pickJaVoice(){
+  if(!('speechSynthesis' in window)) return;
+  const all = speechSynthesis.getVoices().filter(v=>/^ja\b|^ja-/i.test(v.lang||''));
+  if(!all.length) return;
+  // Windows ships several old robotic voices that sort first by default;
+  // a Natural/Neural voice beats Google's, and Google's beats those.
+  const rank = v => /natural|neural|premium|enhanced/i.test(v.name||'') ? 3
+                  : /google/i.test(v.name||'') ? 2 : 1;
+  jaVoice = all.slice().sort((a,b)=>rank(b)-rank(a))[0];
+}
+if('speechSynthesis' in window){
+  pickJaVoice();
+  speechSynthesis.addEventListener('voiceschanged', pickJaVoice);
+}
+
+// Read only the Japanese back; a Japanese voice makes a mess of the English half.
+const japaneseOnly = t =>
+  t.replace(/[A-Za-z][A-Za-z'’]*(?:[\s,.!?'’-]+[A-Za-z][A-Za-z'’]*)*[.!?]?/g, ' ')
+   .replace(/\s+/g, ' ').trim();
+
+function speakJapanese(text){
+  if(!jaVoice) return;
+  const say = japaneseOnly(text);
+  if(!say) return;
+  speechSynthesis.cancel();
+  const u = new SpeechSynthesisUtterance(say);
+  u.voice = jaVoice;
+  u.lang = jaVoice.lang;
+  u.rate = 0.9;
+  speechSynthesis.speak(u);
+}
+
+/* ---- AivisSpeech ------------------------------------------------------------
+   If the engine happens to be running on this machine it reads your sentence
+   in コハク, which is far better than any voice a browser can reach. It is
+   absent whenever the engine is not up and on every phone, so this only ever
+   runs ahead of the device voice, never instead of it.
+
+   The probe cannot happen at page load: Chrome guards requests to the local
+   network behind a permission it will only prompt for during a real click, and
+   a request made without one hangs forever with no error. So the first attempt
+   is made on the first press, with a short fuse.                            */
+const AIVIS = 'http://127.0.0.1:10101';
+const AIVIS_SPEAKER = 1878365376;          // コハク / ノーマル
+let aivisOk = null;                        // null unknown, false ruled out
+const aivisCache = new Map();
+
+function playBuffer(buf){
+  const ctx = replayContext();
+  const src = ctx.createBufferSource();
+  src.buffer = buf;
+  src.connect(ctx.destination);
+  src.start();
+}
+
+let warming = false;
+function warmAivis(){
+  if(warming) return;
+  warming = true;
+  fetch(AIVIS+'/audio_query?text='+encodeURIComponent('準備できたよ。')+'&speaker='+AIVIS_SPEAKER,
+    {method:'POST'}).catch(()=>{}).finally(()=>{ warming = false; });
+}
+
+async function aivisSpeak(text){
+  if(aivisOk === false) return false;
+  const had = aivisCache.get(text);
+  if(had){ playBuffer(had); return true; }
+  try{
+    const q = await fetch(AIVIS+'/audio_query?text='+encodeURIComponent(text)+'&speaker='+AIVIS_SPEAKER,
+      {method:'POST', signal:AbortSignal.timeout(aivisOk ? 15000 : 3000)});
+    if(!q.ok) throw new Error('query '+q.status);
+    const res = await fetch(AIVIS+'/synthesis?speaker='+AIVIS_SPEAKER,
+      {method:'POST', headers:{'Content-Type':'application/json'},
+       body: JSON.stringify(await q.json()), signal: AbortSignal.timeout(25000)});
+    if(!res.ok) throw new Error('synthesis '+res.status);
+    const buf = await replayContext().decodeAudioData(await res.arrayBuffer());
+    aivisCache.set(text, buf);
+    if(aivisCache.size > 40) aivisCache.delete(aivisCache.keys().next().value);
+    aivisOk = true;
+    playBuffer(buf);
+    return true;
+  }catch(e){
+    // A timeout most likely means Chrome is still asking about local network
+    // access, so stay undecided and try again on the next press. Anything else
+    // means the engine really is not reachable.
+    if(!e || e.name !== 'TimeoutError') aivisOk = false;
+    else warmAivis();          // it is probably just cold; get it ready
+    return false;
+  }
+}
+
+function offerSpokenBack(el){
+  if(!jaVoice) return;                       // nothing could speak it at all
+  const p = el.querySelector('.ja');
+  if(!p || !japaneseOnly(plainOf(p))) return;
+  addPlayButton(el, 'Hear this said properly', async (btn)=>{
+    const q = el.querySelector('.ja');
+    if(!q) return;
+    const text = japaneseOnly(plainOf(q));
+    if(!text) return;
+    const ctx = replayContext();
+    if(ctx.state === 'suspended') ctx.resume().catch(()=>{});
+    btn.disabled = true;
+    btn.classList.add('busy');
+    try{
+      if(!await aivisSpeak(text))             // コハク when she is available
+        speakJapanese(text);                  // otherwise the device's own voice
+    } finally {
+      btn.disabled = false;
+      btn.classList.remove('busy');
+    }
+  });
+}
+
 const escHtml = t => t.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 
 // A run of kanji at the very end of a partial line may still be growing —
@@ -505,10 +693,15 @@ async function start(){
     }
     const parts=sc.modelTurn && sc.modelTurn.parts;
     if(parts) for(const p of parts){
-      if(p.inlineData && p.inlineData.data) playPCM(p.inlineData.data);
+      if(p.inlineData && p.inlineData.data){
+        playPCM(p.inlineData.data);            // playback path, untouched
+        const by = b64ToBytes(p.inlineData.data);
+        turnAudio.push(new Int16Array(by.buffer, by.byteOffset, by.byteLength/2).slice());
+      }
     }
     if(sc.turnComplete){
-      if(curModel) addFurigana(curModel);   // fire-and-forget, not awaited
+      if(curModel){ addFurigana(curModel); keepHerVoice(curModel); }
+      if(curUser) offerSpokenBack(curUser);
       curModel=null; curUser=null;
     }
   };

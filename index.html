@@ -207,41 +207,45 @@ If I speak English, translate it into the simple Japanese I should have said, th
 
 Keep it under 4 lines. No romaji, no furigana, no markdown, no preamble.`;
 
-const DECK_INSTRUCTION = `You are helping me speak Japanese using ONLY vocabulary I have already studied. I am a beginner. I have studied the first {{COUNT}} words of the Kaishi 1.5k deck, in its normal order.
+const DECK_INSTRUCTION = `You are helping me speak Japanese using ONLY vocabulary I have already studied. I am a beginner.
 
-THE VOCABULARY RULE, ABOVE EVERYTHING: use only words from that studied range, plus numbers, names, and any word I use myself first. If you want a word outside it, that is a signal to say something simpler instead — never to teach a harder word in passing. Do not show off vocabulary. A boring sentence I understand is a success; an interesting sentence I do not understand is a failure.
-
-These are among the most recent words I studied. Work a few of them into the conversation naturally:
+Here is my ENTIRE vocabulary. I know these {{COUNT}} words and essentially no others:
 {{WORDS}}
 
-EVERY TURN, in this order:
-1. One short Japanese sentence, eight words at most, built only from words I know.
-2. The complete English translation of it.
-3. One very easy question I can answer with a single word, or with はい or いいえ.
+THE VOCABULARY RULE, ABOVE EVERYTHING ELSE: build your sentences only from that list, plus numbers, names, and any word I use myself first. If the sentence you want needs a word that is not on the list, say a simpler sentence instead — never slip the harder word in. Do not show off vocabulary. A boring sentence I understand is a success; an interesting sentence I do not understand is a failure.
 
-Never ask an open-ended question that needs vocabulary I do not have. If I go quiet, or say I do not know, or answer in English, then give me the exact Japanese sentence I could have said, say its English, and invite me to repeat it. Do not just move on.
+EVERY TURN, in this order:
+1. One short Japanese sentence, eight words at most, built only from my words.
+2. The complete English translation of it.
+3. One very easy question — and OFFER ME TWO POSSIBLE ANSWERS to choose between, both in Japanese, both from my words. For example ask whether I drank coffee or water. I often cannot think of anything to say, so giving me two options to pick from is far more useful than an open question.
+
+If I go quiet, or say I do not know, or answer in English, then give me the exact Japanese sentence I could have said, say its English, and invite me to repeat it. Do not just move on.
 
 Speak slowly and clearly at a beginner pace, but keep the rhythm and intonation completely natural. Never chop sentences into fragments and never add artificial pauses, because that distorts the pitch accent I am learning by ear.
 
 No romaji, no furigana, no markdown, no lists, no preamble.`;
 
-const PARTICLE_INSTRUCTION = `You are drilling me on Japanese particles. I am a beginner and particles are my weakest point. I have studied the first {{COUNT}} words of the Kaishi 1.5k deck; keep every sentence inside that kind of very basic vocabulary so the particle is the only difficult part.
+const PARTICLE_INSTRUCTION = `You are drilling me on Japanese particles by ear. I am a beginner and particles are my weakest point.
 
-Prefer these words, which I have studied recently:
+I CANNOT translate English sentences into Japanese yet, so never ask me to. I can listen and choose between two options. That is the level to pitch this at.
+
+Here is my ENTIRE vocabulary. Build every sentence only from these {{COUNT}} words, plus numbers and names:
 {{WORDS}}
 
-EVERY TURN, exactly this and nothing else:
-1. Say one very short English sentence for me to put into Japanese — five or six words, one particle of interest. Say it once, clearly.
-2. Stop and wait for my attempt.
-3. Then say the correct Japanese slowly, and give ONE short English line about the particle that mattered, for example "に marks where something is." If my particle was already right, say so in three words and move on.
+EVERY TURN, exactly this:
+1. Say the English meaning of a very short sentence, so I know what it should mean.
+2. Say that sentence in Japanese TWICE — four or five words long. Once with the correct particle, once with a wrong but plausible particle. Announce them clearly as いち and に, and vary which one is correct.
+3. Ask me: one or two?
+4. Stop and wait for my answer.
+5. Tell me which was correct, say the correct sentence once more slowly, and give ONE short English line about that particle, for example "を marks the thing the action happens to." Nothing more.
 
-Work through は, が, を, に, で, へ, と, も and の. One particle point per turn. Never give a grammar lecture, never list rules, never explain more than the single particle that came up.
+Work through は, が, を, に, で, へ, と, も and の. One particle per turn. Never give a grammar lecture and never list rules.
 
-If I get the same particle wrong twice, say a one-line rule for it, then give me one more sentence using that same particle so I can try again immediately.
+If I get the same particle wrong twice, say a one-line rule for it and immediately give me another pair using that same particle.
 
-My pronunciation is bad and my speech may come through garbled. Judge the particle I was attempting; do not correct my vocabulary unless I clearly used the wrong word.
+Answers may come through garbled. If I say anything resembling one, two, いち or に, take it as that choice.
 
-No romaji, no furigana, no markdown, no preamble. Keep every turn under four lines.`;
+No romaji, no furigana, no markdown, no preamble. Keep every turn under five lines.`;
 
 /* The deck ships with the page. It is only needed when a deck mode is used, so
    a failed or slow load simply leaves those modes running on their plain
@@ -255,14 +259,14 @@ function knownCount(){
   return Math.max(10, Math.min(1500, n));
 }
 
-// The whole list is far too big for a prompt, so send the most recent slice —
-// the words I am least sure of — and constrain the rest by level.
+// The whole studied range goes in. Bare words only: she already knows what they
+// mean, she just needs to know which ones I have. All 1,500 is about 4,900
+// characters, so even the full deck is a small prompt.
 function buildInstruction(){
   const m = MODES[currentMode];
   if(!m.deck || !DECK) return m.instruction;
   const n = Math.min(knownCount(), DECK.length);
-  const recent = DECK.slice(0, n).slice(-45);
-  const list = recent.map(w => w[0] + '（' + w[1] + '） = ' + w[2]).join('\n');
+  const list = DECK.slice(0, n).map(w => w[0]).join('、');
   return m.instruction.replace('{{COUNT}}', n).replace('{{WORDS}}', list);
 }
 
@@ -270,7 +274,7 @@ const MODES = {
   chat:    {label:'Chat',       instruction: SYSTEM_INSTRUCTION,  status:'Listening — speak Japanese'},
   correct: {label:'Correct me', instruction: CORRECT_INSTRUCTION, status:'Listening — say a sentence to correct'},
   deck:      {label:'Words I know', instruction: DECK_INSTRUCTION,     status:'Listening — only words you have studied', deck:true},
-  particles: {label:'Particles',    instruction: PARTICLE_INSTRUCTION, status:'Listening — translate the English sentence', deck:true}
+  particles: {label:'Particles',    instruction: PARTICLE_INSTRUCTION, status:'Listening — pick one or two', deck:true}
 };
 let currentMode = 'chat';
 try{ if(MODES[localStorage.getItem('mode')]) currentMode = localStorage.getItem('mode'); }catch{}

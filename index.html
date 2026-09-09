@@ -202,6 +202,67 @@ function bracketsToRuby(s){
 const stripReadings = s => s.replace(/\[[ぁ-ゖー]+\]/g,'');
 const squash = s => s.replace(/\s+/g,'');
 
+// Ruby markup back to the bare sentence, so we can prove nothing was reworded.
+function rubyToPlain(html){
+  const d = document.createElement('div');
+  d.innerHTML = html;
+  [...d.querySelectorAll('rt,rp')].forEach(n=>n.remove());
+  return d.textContent;
+}
+// Only ruby tags survive; anything else the analyser emits is thrown away.
+const sanitizeRuby = h => h.replace(/<(?!\/?(?:ruby|rt|rp)>)[^>]*>/g,'');
+
+/* ---- offline reader ---------------------------------------------------------
+   A Japanese dictionary (~18 MB) is fetched once and then cached by the
+   browser, after which readings are looked up locally in a millisecond or two.
+   It runs in a worker because building the dictionary blocks its own thread for
+   a couple of seconds and the microphone lives on the main thread. Until it is
+   ready, the network path further down covers for it.                        */
+const KURO = 'https://cdn.jsdelivr.net/npm/kuroshiro@1.2.0/dist/kuroshiro.min.js';
+const KUROA = 'https://cdn.jsdelivr.net/npm/kuroshiro-analyzer-kuromoji@1.1.0/dist/kuroshiro-analyzer-kuromoji.min.js';
+const DICT = 'https://cdn.jsdelivr.net/npm/kuromoji@0.1.2/dict/';
+
+let rubyWorker = null, rubyReady = false, rubyJob = 0;
+const rubyJobs = new Map();
+
+function startRubyWorker(){
+  const src =
+    "importScripts('" + KURO + "','" + KUROA + "');\n" +
+    "var K = self.Kuroshiro.default || self.Kuroshiro;\n" +
+    "var A = self.KuromojiAnalyzer.default || self.KuromojiAnalyzer;\n" +
+    "var k = new K();\n" +
+    "k.init(new A({dictPath:'" + DICT + "'})).then(function(){\n" +
+    "  self.onmessage = function(e){\n" +
+    "    k.convert(e.data.text, {mode:'furigana', to:'hiragana'})\n" +
+    "     .then(function(h){ postMessage({id:e.data.id, html:h}); })\n" +
+    "     .catch(function(){ postMessage({id:e.data.id, html:null}); });\n" +
+    "  };\n" +
+    "  postMessage({ready:true});\n" +
+    "}).catch(function(){ postMessage({failed:true}); });\n";
+  try{
+    rubyWorker = new Worker(URL.createObjectURL(new Blob([src],{type:'text/javascript'})));
+  }catch{ return; }                      // no worker support: network path only
+  rubyWorker.onmessage = e=>{
+    const d = e.data || {};
+    if(d.ready){ rubyReady = true; return; }
+    if(d.failed){ rubyWorker = null; return; }
+    const done = rubyJobs.get(d.id);
+    if(done){ rubyJobs.delete(d.id); done(d.html); }
+  };
+  rubyWorker.onerror = ()=>{ rubyWorker = null; rubyReady = false; };
+}
+startRubyWorker();
+
+function readLocally(text){
+  if(!rubyReady || !rubyWorker) return Promise.resolve(null);
+  return new Promise(done=>{
+    const id = ++rubyJob;
+    rubyJobs.set(id, done);
+    rubyWorker.postMessage({id, text});
+    setTimeout(()=>{ if(rubyJobs.delete(id)) done(null); }, 4000);
+  });
+}
+
 // Readings are cached on the turn itself, so a later re-render puts them
 // straight back instead of losing them.
 function applyRuby(el){
@@ -213,11 +274,17 @@ function applyRuby(el){
   if(ps.map(p=>p.textContent).join('\n') !== el.dataset.rubySrc) return;
   const got = out.split('\n');
   if(got.length !== ps.length) return;
-  ps.forEach((p,i)=>{ p.innerHTML = bracketsToRuby(got[i]); });
+  ps.forEach((p,i)=>{ p.innerHTML = got[i]; });
 }
 
-// One attempt. Returns validated lines, or null if it failed or the model
-// reworded anything.
+function keepRuby(el, src, htmlLines){
+  el.dataset.rubySrc = src;
+  el.dataset.rubyOut = htmlLines.join('\n');
+  applyRuby(el);
+}
+
+// One network attempt. Returns validated bracket lines, or null if it failed or
+// the model reworded anything.
 async function fetchReadings(key, src, want){
   const res = await fetch(
     'https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent',
@@ -241,30 +308,36 @@ async function fetchReadings(key, src, want){
   // a single line sometimes comes back wrapped; fold it back together
   if(got.length !== want && want === 1) got = [got.join(' ')];
   if(got.length !== want) return null;
-  // Removing the readings again must reproduce what was said, or the model
-  // reworded something — discard rather than corrupt the transcript.
   if(squash(stripReadings(got.join('\n'))) !== squash(src)) return null;
   return got;
 }
 
 async function addFurigana(el){
   if(!rubyOn) return;
-  const key = getKey(); if(!key) return;
   const ps = [...el.querySelectorAll('.ja')];
   const src = ps.map(p=>p.textContent).join('\n');
   if(!src.trim() || !/[一-鿿]/.test(src)) return;   // no kanji, nothing to do
-  // Nothing here is on the critical path, so a slow retry costs the user nothing.
+
+  // Instant path: the local dictionary, a line at a time.
+  if(rubyReady){
+    const texts = ps.map(p=>p.textContent);
+    const html = await Promise.all(texts.map(readLocally));
+    // Stripping the readings back out must reproduce what was said.
+    if(html.every(h=>h) &&
+       html.every((h,i)=>squash(rubyToPlain(sanitizeRuby(h))) === squash(texts[i]))){
+      keepRuby(el, src, html.map(sanitizeRuby));
+      return;
+    }
+  }
+
+  // Fallback while the dictionary is still downloading, or if it failed.
+  const key = getKey(); if(!key) return;
   for(let attempt=0; attempt<4; attempt++){
     if(attempt) await new Promise(r=>setTimeout(r, 800*attempt));
     let got = null;
     try{ got = await fetchReadings(key, src, ps.length); }
     catch{ /* offline or blocked; try again */ }
-    if(got){
-      el.dataset.rubySrc = src;
-      el.dataset.rubyOut = got.join('\n');
-      applyRuby(el);
-      return;
-    }
+    if(got){ keepRuby(el, src, got.map(bracketsToRuby)); return; }
   }
 }
 

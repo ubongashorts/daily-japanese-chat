@@ -82,6 +82,11 @@
   .en{font-size:14px;color:var(--muted);margin:0 0 3px}
   .turn.me .ja{font-size:16px}
   .turn.me{opacity:.82}
+  #knownWrap{display:flex;align-items:center;gap:5px;font-size:11.5px;color:var(--muted)}
+  #knownWrap[hidden]{display:none}
+  #known{width:58px;font:inherit;font-size:12px;padding:4px 6px;border-radius:7px;
+    border:1px solid var(--line);background:var(--panel);color:var(--ink)}
+  @media (max-width:560px){ #knownWrap{font-size:11px} #known{width:48px} }
   #logPanel[hidden]{display:none}   /* beats the display:flex below */
   #logPanel{position:fixed;inset:0;z-index:20;display:flex;align-items:center;
     justify-content:center;padding:18px;background:rgba(0,0,0,.45)}
@@ -119,7 +124,12 @@
   <select id="modeSel" title="What she does with what you say">
     <option value="chat">Chat</option>
     <option value="correct">Correct me</option>
+    <option value="deck">Words I know</option>
+    <option value="particles">Particles</option>
   </select>
+  <label id="knownWrap" title="How many Kaishi 1.5k words you have studied">
+    known <input id="known" type="number" min="10" max="1500" step="10">
+  </label>
   <button id="rubyBtn" class="ghost" title="Show furigana above kanji">ふりがな</button>
   <button id="logBtn" class="ghost" title="See and save everything that was said">Log</button>
   <button id="keyBtn" class="ghost" title="Set or replace the API key stored in this browser">Key</button>
@@ -197,9 +207,70 @@ If I speak English, translate it into the simple Japanese I should have said, th
 
 Keep it under 4 lines. No romaji, no furigana, no markdown, no preamble.`;
 
+const DECK_INSTRUCTION = `You are helping me speak Japanese using ONLY vocabulary I have already studied. I am a beginner. I have studied the first {{COUNT}} words of the Kaishi 1.5k deck, in its normal order.
+
+THE VOCABULARY RULE, ABOVE EVERYTHING: use only words from that studied range, plus numbers, names, and any word I use myself first. If you want a word outside it, that is a signal to say something simpler instead — never to teach a harder word in passing. Do not show off vocabulary. A boring sentence I understand is a success; an interesting sentence I do not understand is a failure.
+
+These are among the most recent words I studied. Work a few of them into the conversation naturally:
+{{WORDS}}
+
+EVERY TURN, in this order:
+1. One short Japanese sentence, eight words at most, built only from words I know.
+2. The complete English translation of it.
+3. One very easy question I can answer with a single word, or with はい or いいえ.
+
+Never ask an open-ended question that needs vocabulary I do not have. If I go quiet, or say I do not know, or answer in English, then give me the exact Japanese sentence I could have said, say its English, and invite me to repeat it. Do not just move on.
+
+Speak slowly and clearly at a beginner pace, but keep the rhythm and intonation completely natural. Never chop sentences into fragments and never add artificial pauses, because that distorts the pitch accent I am learning by ear.
+
+No romaji, no furigana, no markdown, no lists, no preamble.`;
+
+const PARTICLE_INSTRUCTION = `You are drilling me on Japanese particles. I am a beginner and particles are my weakest point. I have studied the first {{COUNT}} words of the Kaishi 1.5k deck; keep every sentence inside that kind of very basic vocabulary so the particle is the only difficult part.
+
+Prefer these words, which I have studied recently:
+{{WORDS}}
+
+EVERY TURN, exactly this and nothing else:
+1. Say one very short English sentence for me to put into Japanese — five or six words, one particle of interest. Say it once, clearly.
+2. Stop and wait for my attempt.
+3. Then say the correct Japanese slowly, and give ONE short English line about the particle that mattered, for example "に marks where something is." If my particle was already right, say so in three words and move on.
+
+Work through は, が, を, に, で, へ, と, も and の. One particle point per turn. Never give a grammar lecture, never list rules, never explain more than the single particle that came up.
+
+If I get the same particle wrong twice, say a one-line rule for it, then give me one more sentence using that same particle so I can try again immediately.
+
+My pronunciation is bad and my speech may come through garbled. Judge the particle I was attempting; do not correct my vocabulary unless I clearly used the wrong word.
+
+No romaji, no furigana, no markdown, no preamble. Keep every turn under four lines.`;
+
+/* The deck ships with the page. It is only needed when a deck mode is used, so
+   a failed or slow load simply leaves those modes running on their plain
+   instruction rather than breaking anything. */
+let DECK = null;
+fetch('kaishi.json').then(r=>r.ok ? r.json() : null).then(d=>{ if(Array.isArray(d)) DECK = d; }).catch(()=>{});
+
+function knownCount(){
+  let n = 100;
+  try{ n = parseInt(localStorage.getItem('known') || '100', 10) || 100; }catch{}
+  return Math.max(10, Math.min(1500, n));
+}
+
+// The whole list is far too big for a prompt, so send the most recent slice —
+// the words I am least sure of — and constrain the rest by level.
+function buildInstruction(){
+  const m = MODES[currentMode];
+  if(!m.deck || !DECK) return m.instruction;
+  const n = Math.min(knownCount(), DECK.length);
+  const recent = DECK.slice(0, n).slice(-45);
+  const list = recent.map(w => w[0] + '（' + w[1] + '） = ' + w[2]).join('\n');
+  return m.instruction.replace('{{COUNT}}', n).replace('{{WORDS}}', list);
+}
+
 const MODES = {
   chat:    {label:'Chat',       instruction: SYSTEM_INSTRUCTION,  status:'Listening — speak Japanese'},
-  correct: {label:'Correct me', instruction: CORRECT_INSTRUCTION, status:'Listening — say a sentence to correct'}
+  correct: {label:'Correct me', instruction: CORRECT_INSTRUCTION, status:'Listening — say a sentence to correct'},
+  deck:      {label:'Words I know', instruction: DECK_INSTRUCTION,     status:'Listening — only words you have studied', deck:true},
+  particles: {label:'Particles',    instruction: PARTICLE_INSTRUCTION, status:'Listening — translate the English sentence', deck:true}
 };
 let currentMode = 'chat';
 try{ if(MODES[localStorage.getItem('mode')]) currentMode = localStorage.getItem('mode'); }catch{}
@@ -465,9 +536,20 @@ $('logClear').onclick = ()=>{
 
 
 $('modeSel').value = currentMode;
+$('known').value = knownCount();
+// the word count only means anything for the deck-driven modes
+function paintKnown(){ $('knownWrap').hidden = !MODES[currentMode].deck; }
+paintKnown();
+$('known').onchange = ()=>{
+  const n = Math.max(10, Math.min(1500, parseInt($('known').value,10) || 100));
+  $('known').value = n;
+  try{ localStorage.setItem('known', String(n)); }catch{}
+  if(running && MODES[currentMode].deck){ stop(); setStatus('Reloading your words…'); setTimeout(start, 500); }
+};
 $('modeSel').onchange = ()=>{
   currentMode = $('modeSel').value;
   try{ localStorage.setItem('mode', currentMode); }catch{}
+  paintKnown();
   // The instruction is only sent when the socket opens, so switching mode
   // mid-session means reconnecting.
   if(running){ stop(); setStatus('Switching mode…'); setTimeout(start, 500); }
@@ -814,7 +896,7 @@ async function start(){
         responseModalities:['AUDIO'],
         speechConfig:{voiceConfig:{prebuiltVoiceConfig:{voiceName:$('voice').value}}}
       },
-      systemInstruction:{parts:[{text:MODES[currentMode].instruction}]},
+      systemInstruction:{parts:[{text:buildInstruction()}]},
       inputAudioTranscription:{},
       outputAudioTranscription:{}
     }}));

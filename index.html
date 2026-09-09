@@ -82,11 +82,6 @@
   .en{font-size:14px;color:var(--muted);margin:0 0 3px}
   .turn.me .ja{font-size:16px}
   .turn.me{opacity:.82}
-  #knownWrap{display:flex;align-items:center;gap:5px;font-size:11.5px;color:var(--muted)}
-  #knownWrap[hidden]{display:none}
-  #known{width:58px;font:inherit;font-size:12px;padding:4px 6px;border-radius:7px;
-    border:1px solid var(--line);background:var(--panel);color:var(--ink)}
-  @media (max-width:560px){ #knownWrap{font-size:11px} #known{width:48px} }
   #logPanel[hidden]{display:none}   /* beats the display:flex below */
   #logPanel{position:fixed;inset:0;z-index:20;display:flex;align-items:center;
     justify-content:center;padding:18px;background:rgba(0,0,0,.45)}
@@ -127,9 +122,6 @@
     <option value="deck">Words I know</option>
     <option value="particles">Particles</option>
   </select>
-  <label id="knownWrap" title="How many Kaishi 1.5k words you have studied">
-    known <input id="known" type="number" min="10" max="1500" step="10">
-  </label>
   <button id="rubyBtn" class="ghost" title="Show furigana above kanji">ふりがな</button>
   <button id="logBtn" class="ghost" title="See and save everything that was said">Log</button>
   <button id="keyBtn" class="ghost" title="Set or replace the API key stored in this browser">Key</button>
@@ -207,17 +199,22 @@ If I speak English, translate it into the simple Japanese I should have said, th
 
 Keep it under 4 lines. No romaji, no furigana, no markdown, no preamble.`;
 
-const DECK_INSTRUCTION = `You are helping me speak Japanese using ONLY vocabulary I have already studied. I am a beginner.
+const VOCAB_RULE = `Here is my ENTIRE vocabulary: the Kaishi 1.5k beginner deck. Build your sentences only from these words, plus numbers, names, and any word I use myself first.
 
-Here is my ENTIRE vocabulary. I know these {{COUNT}} words and essentially no others:
-{{WORDS}}
+THE LIST IS ORDERED, from the most basic and most common words down to the least. Strongly prefer words from the beginning of it — the first few hundred should carry almost everything you say. Reach further down only when you genuinely need to, and when you do, put the word in a sentence where its meaning is obvious from context.
 
-THE VOCABULARY RULE, ABOVE EVERYTHING ELSE: build your sentences only from that list, plus numbers, names, and any word I use myself first. If the sentence you want needs a word that is not on the list, say a simpler sentence instead — never slip the harder word in. Do not show off vocabulary. A boring sentence I understand is a success; an interesting sentence I do not understand is a failure.
+If the sentence you want needs a word that is not on this list at all, say a simpler sentence instead. Never slip the harder word in. A boring sentence I understand is a success; an interesting sentence I do not understand is a failure.
+
+{{WORDS}}`;
+
+const DECK_INSTRUCTION = `You are helping me speak Japanese using only vocabulary a beginner has studied. I am a beginner.
+
+{{VOCAB}}
 
 EVERY TURN, in this order:
 1. One short Japanese sentence, eight words at most, built only from my words.
 2. The complete English translation of it.
-3. One very easy question — and OFFER ME TWO POSSIBLE ANSWERS to choose between, both in Japanese, both from my words. For example ask whether I drank coffee or water. I often cannot think of anything to say, so giving me two options to pick from is far more useful than an open question.
+3. One very easy question — and OFFER ME TWO POSSIBLE ANSWERS to choose between, both in Japanese, both from my words. For example ask whether I drank coffee or water. I often cannot think of anything to say, so two options to pick from are far more useful than an open question.
 
 If I go quiet, or say I do not know, or answer in English, then give me the exact Japanese sentence I could have said, say its English, and invite me to repeat it. Do not just move on.
 
@@ -229,8 +226,7 @@ const PARTICLE_INSTRUCTION = `You are drilling me on Japanese particles by ear. 
 
 I CANNOT translate English sentences into Japanese yet, so never ask me to. I can listen and choose between two options. That is the level to pitch this at.
 
-Here is my ENTIRE vocabulary. Build every sentence only from these {{COUNT}} words, plus numbers and names:
-{{WORDS}}
+{{VOCAB}}
 
 EVERY TURN, exactly this:
 1. Say the English meaning of a very short sentence, so I know what it should mean.
@@ -253,21 +249,14 @@ No romaji, no furigana, no markdown, no preamble. Keep every turn under five lin
 let DECK = null;
 fetch('kaishi.json').then(r=>r.ok ? r.json() : null).then(d=>{ if(Array.isArray(d)) DECK = d; }).catch(()=>{});
 
-function knownCount(){
-  let n = 100;
-  try{ n = parseInt(localStorage.getItem('known') || '100', 10) || 100; }catch{}
-  return Math.max(10, Math.min(1500, n));
-}
-
-// The whole studied range goes in. Bare words only: she already knows what they
-// mean, she just needs to know which ones I have. All 1,500 is about 4,900
-// characters, so even the full deck is a small prompt.
+// Bare words only: she already knows what they mean, she just needs to know
+// which ones I have. All 1,500 is about 4,900 characters, so the whole deck
+// goes in and its ORDER does the work that a progress number used to.
 function buildInstruction(){
   const m = MODES[currentMode];
   if(!m.deck || !DECK) return m.instruction;
-  const n = Math.min(knownCount(), DECK.length);
-  const list = DECK.slice(0, n).map(w => w[0]).join('、');
-  return m.instruction.replace('{{COUNT}}', n).replace('{{WORDS}}', list);
+  const vocab = VOCAB_RULE.replace('{{WORDS}}', DECK.map(w => w[0]).join('、'));
+  return m.instruction.replace('{{VOCAB}}', vocab);
 }
 
 const MODES = {
@@ -540,20 +529,9 @@ $('logClear').onclick = ()=>{
 
 
 $('modeSel').value = currentMode;
-$('known').value = knownCount();
-// the word count only means anything for the deck-driven modes
-function paintKnown(){ $('knownWrap').hidden = !MODES[currentMode].deck; }
-paintKnown();
-$('known').onchange = ()=>{
-  const n = Math.max(10, Math.min(1500, parseInt($('known').value,10) || 100));
-  $('known').value = n;
-  try{ localStorage.setItem('known', String(n)); }catch{}
-  if(running && MODES[currentMode].deck){ stop(); setStatus('Reloading your words…'); setTimeout(start, 500); }
-};
 $('modeSel').onchange = ()=>{
   currentMode = $('modeSel').value;
   try{ localStorage.setItem('mode', currentMode); }catch{}
-  paintKnown();
   // The instruction is only sent when the socket opens, so switching mode
   // mid-session means reconnecting.
   if(running){ stop(); setStatus('Switching mode…'); setTimeout(start, 500); }

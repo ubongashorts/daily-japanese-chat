@@ -82,6 +82,20 @@
   .en{font-size:14px;color:var(--muted);margin:0 0 3px}
   .turn.me .ja{font-size:16px}
   .turn.me{opacity:.82}
+  #logPanel{position:fixed;inset:0;z-index:20;display:flex;align-items:center;
+    justify-content:center;padding:18px;background:rgba(0,0,0,.45)}
+  .logCard{background:var(--panel);border:1px solid var(--line);border-radius:12px;
+    width:min(680px,100%);max-height:82vh;display:flex;flex-direction:column;overflow:hidden}
+  .logHead{display:flex;align-items:center;gap:7px;padding:11px 13px;
+    border-bottom:1px solid var(--line);font-size:13px}
+  #logBody{overflow-y:auto;padding:12px 14px;font-size:14px;line-height:1.6;
+    -webkit-overflow-scrolling:touch}
+  .logDay{font-size:11px;text-transform:uppercase;letter-spacing:.09em;color:var(--muted);
+    margin:14px 0 6px;padding-bottom:4px;border-bottom:1px solid var(--line)}
+  .logDay:first-child{margin-top:0}
+  .logRow{display:flex;gap:9px;padding:3px 0}
+  .logWho{flex:none;width:30px;font-size:11px;color:var(--muted);padding-top:3px}
+  .logRow.me{opacity:.78}
   .err{color:var(--accent);font-size:13px;padding:12px 2px;white-space:pre-wrap}
   footer{border-top:1px solid var(--line);padding:9px 20px;font-size:11.5px;color:var(--muted)}
   code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px}
@@ -101,7 +115,12 @@
     <option>Zephyr</option><option>Puck</option><option>Charon</option>
     <option>Kore</option><option>Fenrir</option><option>Aoede</option>
   </select>
+  <select id="modeSel" title="What she does with what you say">
+    <option value="chat">Chat</option>
+    <option value="correct">Correct me</option>
+  </select>
   <button id="rubyBtn" class="ghost" title="Show furigana above kanji">ふりがな</button>
+  <button id="logBtn" class="ghost" title="See and save everything that was said">Log</button>
   <button id="keyBtn" class="ghost" title="Set or replace the API key stored in this browser">Key</button>
 </header>
 
@@ -116,6 +135,15 @@
   </div>
 </main>
 
+<div id="logPanel" hidden>
+  <div class="logCard">
+    <div class="logHead"><b>Log</b><span class="spacer"></span>
+      <button id="logSave" class="ghost">Download</button>
+      <button id="logClear" class="ghost">Clear</button>
+      <button id="logClose" class="ghost">Close</button></div>
+    <div id="logBody"></div>
+  </div>
+</div>
 <footer>Your API key is stored only in this browser and is never uploaded. Tap <b>Key</b> to set or replace it.</footer>
 
 <script>
@@ -151,6 +179,30 @@ COMMANDS I may say at any time:
 "Easier" - shorter and simpler.
 "No English" - drop the translations until I say otherwise.
 "English please" - bring the translations back.`;
+
+const CORRECT_INSTRUCTION = `You are correcting my spoken Japanese. I am a beginner, roughly JLPT N5, saying sentences out loud. This is voice, so keep everything short and easy to follow by ear.
+
+EVERY TURN, do exactly this and nothing else:
+1. Say the closest correct Japanese to what I was trying to say. Change AS LITTLE AS POSSIBLE. Fix particles, conjugation, politeness, word order and counters. Keep my words, my vocabulary and my level. Do not make it longer, do not make it fancier, do not make it more advanced, and do not turn it into a different sentence. If what I said was already correct, simply say it back unchanged.
+2. Then, in English, one short line naming what changed, for example "を should be が." If nothing needed fixing, say "That was already correct."
+
+Then stop and wait for my next attempt. Do NOT reply to what I said, do NOT ask a question, do NOT continue a conversation, do NOT add encouragement.
+
+MY SPEECH IS UNRELIABLE. My pronunciation is bad and words may come through garbled. Correct the GRAMMAR of the sentence I was attempting. Never invent vocabulary I did not try to say, and never replace a word just because it sounded odd. If a word is genuinely unclear, keep my word, correct everything around it, and add a short English "(unsure of one word)".
+
+If you cannot tell what I meant at all, give your best guess and add a short English "(if you meant ...)" instead of inventing a different sentence.
+
+If I speak English, translate it into the simple Japanese I should have said, then give the English line as usual.
+
+Keep it under 4 lines. No romaji, no furigana, no markdown, no preamble.`;
+
+const MODES = {
+  chat:    {label:'Chat',       instruction: SYSTEM_INSTRUCTION,  status:'Listening — speak Japanese'},
+  correct: {label:'Correct me', instruction: CORRECT_INSTRUCTION, status:'Listening — say a sentence to correct'}
+};
+let currentMode = 'chat';
+try{ if(MODES[localStorage.getItem('mode')]) currentMode = localStorage.getItem('mode'); }catch{}
+
 
 const IN_RATE = 16000, OUT_RATE = 24000;
 // Auto-stop after this much continuous silence, so it never sits open streaming.
@@ -321,6 +373,103 @@ async function fetchReadings(key, src, want){
   if(squash(stripReadings(got.join('\n'))) !== squash(src)) return null;
   return got;
 }
+
+/* ---- log --------------------------------------------------------------------
+   Kept in this browser so a session survives a reload, and downloadable as a
+   plain text file. Readings are stripped before storing: a paragraph carrying
+   ruby reports them as part of its text.                                     */
+const LOG_KEY = 'chatLog', LOG_MAX = 4000;
+
+function readLog(){
+  try{ return JSON.parse(localStorage.getItem(LOG_KEY) || '[]'); }catch{ return []; }
+}
+function logTurn(who, text){
+  const t = (text || '').trim();
+  if(!t) return;
+  try{
+    const log = readLog();
+    log.push({t: Date.now(), m: currentMode, who, text: t});
+    while(log.length > LOG_MAX) log.shift();
+    localStorage.setItem(LOG_KEY, JSON.stringify(log));
+  }catch{ /* full or blocked; the conversation matters more than the log */ }
+}
+function logTurnFrom(el, who){
+  const ps = [...el.querySelectorAll('.ja,.en')];
+  logTurn(who, ps.map(plainOf).join(' '));
+}
+
+const stamp = ms => new Date(ms).toLocaleString();
+
+function logAsText(){
+  return readLog().map(e =>
+    stamp(e.t) + '\t' + (e.m || 'chat') + '\t' + (e.who === 'me' ? 'YOU' : 'AI ') + '\t' + e.text
+  ).join('\n') + '\n';
+}
+
+function renderLog(){
+  const log = readLog();
+  const box = $('logBody');
+  box.textContent = '';
+  if(!log.length){ box.textContent = 'Nothing logged yet.'; return; }
+  let day = '';
+  for(const e of log){
+    const d = new Date(e.t).toLocaleDateString();
+    if(d !== day){
+      day = d;
+      const h = document.createElement('div');
+      h.className = 'logDay';
+      h.textContent = d;
+      box.appendChild(h);
+    }
+    const row = document.createElement('div');
+    row.className = 'logRow ' + (e.who === 'me' ? 'me' : 'ai');
+    const w = document.createElement('span');
+    w.className = 'logWho';
+    w.textContent = e.who === 'me' ? 'You' : 'AI';
+    const s = document.createElement('span');
+    s.textContent = e.text;
+    row.append(w, s);
+    box.appendChild(row);
+  }
+  box.scrollTop = box.scrollHeight;
+}
+
+$('logBtn').onclick = ()=>{ renderLog(); $('logPanel').hidden = false; };
+$('logClose').onclick = ()=>{ $('logPanel').hidden = true; };
+$('logPanel').onclick = e =>{ if(e.target === $('logPanel')) $('logPanel').hidden = true; };
+
+$('logSave').onclick = ()=>{
+  const blob = new Blob([logAsText()], {type:'text/plain;charset=utf-8'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'japanese-chat-log-' + new Date().toISOString().slice(0,10) + '.txt';
+  a.click();
+  setTimeout(()=>URL.revokeObjectURL(a.href), 8000);
+};
+
+// Two taps rather than a confirm() dialog, which would block the page.
+let clearArmed = null;
+$('logClear').onclick = ()=>{
+  const b = $('logClear');
+  if(!clearArmed){
+    b.textContent = 'Tap again to delete';
+    clearArmed = setTimeout(()=>{ clearArmed = null; b.textContent = 'Clear'; }, 4000);
+    return;
+  }
+  clearTimeout(clearArmed); clearArmed = null; b.textContent = 'Clear';
+  try{ localStorage.removeItem(LOG_KEY); }catch{}
+  renderLog();
+};
+
+
+$('modeSel').value = currentMode;
+$('modeSel').onchange = ()=>{
+  currentMode = $('modeSel').value;
+  try{ localStorage.setItem('mode', currentMode); }catch{}
+  // The instruction is only sent when the socket opens, so switching mode
+  // mid-session means reconnecting.
+  if(running){ stop(); setStatus('Switching mode…'); setTimeout(start, 500); }
+};
 
 /* ---- replay -----------------------------------------------------------------
    Her side plays back the audio she actually sent, kept as raw PCM. Your side
@@ -663,7 +812,7 @@ async function start(){
         responseModalities:['AUDIO'],
         speechConfig:{voiceConfig:{prebuiltVoiceConfig:{voiceName:$('voice').value}}}
       },
-      systemInstruction:{parts:[{text:SYSTEM_INSTRUCTION}]},
+      systemInstruction:{parts:[{text:MODES[currentMode].instruction}]},
       inputAudioTranscription:{},
       outputAudioTranscription:{}
     }}));
@@ -673,7 +822,7 @@ async function start(){
     const raw = ev.data instanceof Blob ? await ev.data.text() : ev.data;
     let msg; try{ msg=JSON.parse(raw); }catch{ return; }
 
-    if(msg.setupComplete){ setStatus('Listening — speak Japanese','live'); openMic(); return; }
+    if(msg.setupComplete){ setStatus(MODES[currentMode].status,'live'); openMic(); return; }
 
     const sc=msg.serverContent;
     if(!sc) return;
@@ -700,8 +849,8 @@ async function start(){
       }
     }
     if(sc.turnComplete){
-      if(curModel){ addFurigana(curModel); keepHerVoice(curModel); }
-      if(curUser) offerSpokenBack(curUser);
+      if(curModel){ addFurigana(curModel); keepHerVoice(curModel); logTurnFrom(curModel,'ai'); }
+      if(curUser){ offerSpokenBack(curUser); logTurnFrom(curUser,'me'); }
       curModel=null; curUser=null;
     }
   };

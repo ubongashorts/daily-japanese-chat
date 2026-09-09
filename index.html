@@ -209,6 +209,8 @@ function rubyToPlain(html){
   [...d.querySelectorAll('rt,rp')].forEach(n=>n.remove());
   return d.textContent;
 }
+// What was actually said, with any readings already on screen taken back out.
+const plainOf = p => rubyToPlain(p.innerHTML);
 // Only ruby tags survive; anything else the analyser emits is thrown away.
 const sanitizeRuby = h => h.replace(/<(?!\/?(?:ruby|rt|rp)>)[^>]*>/g,'');
 
@@ -271,7 +273,7 @@ function applyRuby(el){
   if(!out) return;
   const ps = [...el.querySelectorAll('.ja')];
   if(!ps.length) return;
-  if(ps.map(p=>p.textContent).join('\n') !== el.dataset.rubySrc) return;
+  if(ps.map(plainOf).join('\n') !== el.dataset.rubySrc) return;
   const got = out.split('\n');
   if(got.length !== ps.length) return;
   ps.forEach((p,i)=>{ p.innerHTML = got[i]; });
@@ -312,19 +314,53 @@ async function fetchReadings(key, src, want){
   return got;
 }
 
+const escHtml = t => t.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+
+// A run of kanji at the very end of a partial line may still be growing —
+// 今 becomes 今日, 日本 becomes 日本語 — and reading it now would flash the
+// wrong furigana for a moment. Hold it back until the next chunk lands.
+const safePrefix = t => t.replace(/[一-鿿々]+$/,'');
+
+// Only one pass per turn may win, so a slow result can't overwrite a newer one.
+const bumpSeq = el => (el.__rubySeq = (el.__rubySeq || 0) + 1);
+
+// Runs on every transcription chunk while she is still speaking. Local
+// dictionary only — the network path is far too slow to keep up mid-sentence.
+async function liveFurigana(el){
+  if(!rubyOn || !rubyReady) return;
+  const ps = [...el.querySelectorAll('.ja')];
+  if(!ps.length) return;
+  const texts = ps.map(plainOf);
+  const seq = bumpSeq(el);
+  const lines = await Promise.all(texts.map(async t=>{
+    const head = safePrefix(t);
+    if(!/[一-鿿]/.test(head)) return null;
+    const h = await readLocally(head);
+    if(!h) return null;
+    const clean = sanitizeRuby(h);
+    if(squash(rubyToPlain(clean)) !== squash(head)) return null;
+    return clean + escHtml(t.slice(head.length));
+  }));
+  if(el.__rubySeq !== seq) return;            // a newer chunk got there first
+  if(!lines.some(h=>h)) return;
+  keepRuby(el, texts.join('\n'), lines.map((h,i)=> h || escHtml(texts[i])));
+}
+
 async function addFurigana(el){
   if(!rubyOn) return;
+  const seq = bumpSeq(el);
   const ps = [...el.querySelectorAll('.ja')];
-  const src = ps.map(p=>p.textContent).join('\n');
+  const src = ps.map(plainOf).join('\n');
   if(!src.trim() || !/[一-鿿]/.test(src)) return;   // no kanji, nothing to do
 
   // Instant path: the local dictionary, a line at a time.
   if(rubyReady){
-    const texts = ps.map(p=>p.textContent);
+    const texts = ps.map(plainOf);
     const html = await Promise.all(texts.map(readLocally));
     // Stripping the readings back out must reproduce what was said.
     if(html.every(h=>h) &&
        html.every((h,i)=>squash(rubyToPlain(sanitizeRuby(h))) === squash(texts[i]))){
+      if(el.__rubySeq !== seq) return;
       keepRuby(el, src, html.map(sanitizeRuby));
       return;
     }
@@ -337,7 +373,7 @@ async function addFurigana(el){
     let got = null;
     try{ got = await fetchReadings(key, src, ps.length); }
     catch{ /* offline or blocked; try again */ }
-    if(got){ keepRuby(el, src, got.map(bracketsToRuby)); return; }
+    if(got){ if(el.__rubySeq === seq) keepRuby(el, src, got.map(bracketsToRuby)); return; }
   }
 }
 
@@ -465,6 +501,7 @@ async function start(){
       if(!curModel) curModel=turnEl('ai','Japanese Chat');
       curModel.dataset.t=(curModel.dataset.t||'')+sc.outputTranscription.text;
       render(curModel,curModel.dataset.t);
+      liveFurigana(curModel);   // furigana keeps up with her voice
     }
     const parts=sc.modelTurn && sc.modelTurn.parts;
     if(parts) for(const p of parts){

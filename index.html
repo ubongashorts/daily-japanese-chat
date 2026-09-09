@@ -82,6 +82,7 @@
   .en{font-size:14px;color:var(--muted);margin:0 0 3px}
   .turn.me .ja{font-size:16px}
   .turn.me{opacity:.82}
+  #logPanel[hidden]{display:none}   /* beats the display:flex below */
   #logPanel{position:fixed;inset:0;z-index:20;display:flex;align-items:center;
     justify-content:center;padding:18px;background:rgba(0,0,0,.45)}
   .logCard{background:var(--panel);border:1px solid var(--line);border-radius:12px;
@@ -437,6 +438,7 @@ function renderLog(){
 $('logBtn').onclick = ()=>{ renderLog(); $('logPanel').hidden = false; };
 $('logClose').onclick = ()=>{ $('logPanel').hidden = true; };
 $('logPanel').onclick = e =>{ if(e.target === $('logPanel')) $('logPanel').hidden = true; };
+addEventListener('keydown', e =>{ if(e.key === 'Escape') $('logPanel').hidden = true; });
 
 $('logSave').onclick = ()=>{
   const blob = new Blob([logAsText()], {type:'text/plain;charset=utf-8'});

@@ -186,6 +186,10 @@ $('rubyBtn').onclick = ()=>{
   rubyOn = !rubyOn;
   try{ localStorage.setItem('ruby', rubyOn ? 'on' : 'off'); }catch{}
   paintRubyBtn();
+  // repaint turns already on screen instead of only affecting future ones
+  [...logEl.querySelectorAll('.turn')].forEach(t=>{
+    if(t.dataset.t) render(t, t.dataset.t);
+  });
 };
 paintRubyBtn();
 
@@ -195,33 +199,73 @@ function bracketsToRuby(s){
   return esc(s).replace(/([一-鿿々]+)\[([ぁ-ゖー]+)\]/g,
     (_,k,r)=>'<ruby>'+k+'<rt>'+r+'</rt></ruby>');
 }
+const stripReadings = s => s.replace(/\[[ぁ-ゖー]+\]/g,'');
+const squash = s => s.replace(/\s+/g,'');
+
+// Readings are cached on the turn itself, so a later re-render puts them
+// straight back instead of losing them.
+function applyRuby(el){
+  if(!rubyOn) return;
+  const out = el.dataset.rubyOut;
+  if(!out) return;
+  const ps = [...el.querySelectorAll('.ja')];
+  if(!ps.length) return;
+  if(ps.map(p=>p.textContent).join('\n') !== el.dataset.rubySrc) return;
+  const got = out.split('\n');
+  if(got.length !== ps.length) return;
+  ps.forEach((p,i)=>{ p.innerHTML = bracketsToRuby(got[i]); });
+}
+
+// One attempt. Returns validated lines, or null if it failed or the model
+// reworded anything.
+async function fetchReadings(key, src, want){
+  const res = await fetch(
+    'https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent',
+    { method:'POST',
+      headers:{'Content-Type':'application/json','X-goog-api-key':key},
+      body: JSON.stringify({
+        contents:[{parts:[{text:
+          'Add hiragana readings to every kanji word in the text below. '+
+          'Put each reading in square brackets immediately after its kanji, like 元気[げんき]. '+
+          'The text may mix Japanese with an English translation. Leave the English, '+
+          'the kana, the spacing and the punctuation exactly as they are, and reply '+
+          'with the same number of lines you were given. '+
+          'Reply with the text only, no explanation, no markdown.\n\n'+src}]}],
+        generationConfig:{temperature:0, thinkingConfig:{thinkingBudget:0}}
+      }) });
+  if(!res.ok) return null;                       // 503s are common; caller retries
+  const j = await res.json();
+  const raw = j?.candidates?.[0]?.content?.parts?.[0]?.text;
+  if(!raw) return null;
+  let got = raw.trim().split('\n').map(t=>t.trim()).filter(Boolean);
+  // a single line sometimes comes back wrapped; fold it back together
+  if(got.length !== want && want === 1) got = [got.join(' ')];
+  if(got.length !== want) return null;
+  // Removing the readings again must reproduce what was said, or the model
+  // reworded something — discard rather than corrupt the transcript.
+  if(squash(stripReadings(got.join('\n'))) !== squash(src)) return null;
+  return got;
+}
 
 async function addFurigana(el){
   if(!rubyOn) return;
   const key = getKey(); if(!key) return;
-  const lines = [...el.querySelectorAll('.ja')].map(p=>p.textContent).join('\n');
-  if(!lines.trim() || !/[一-鿿]/.test(lines)) return;   // no kanji, nothing to do
-  try{
-    const res = await fetch(
-      'https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent',
-      { method:'POST',
-        headers:{'Content-Type':'application/json','X-goog-api-key':key},
-        body: JSON.stringify({
-          contents:[{parts:[{text:
-            'Add hiragana readings to every kanji word in the Japanese text below. '+
-            'Put each reading in square brackets immediately after its kanji, like 元気[げんき]. '+
-            'Change nothing else: keep all kana, punctuation and line breaks exactly as they are. '+
-            'Reply with the text only, no explanation.\n\n'+lines}]}],
-          generationConfig:{temperature:0}
-        }) });
-    if(!res.ok) return;
-    const j = await res.json();
-    const out = j?.candidates?.[0]?.content?.parts?.[0]?.text;
-    if(!out) return;
-    const got = out.trim().split('\n').filter(t=>t.trim());
-    const ps = [...el.querySelectorAll('.ja')];
-    ps.forEach((p,i)=>{ if(got[i]) p.innerHTML = bracketsToRuby(got[i].trim()); });
-  }catch{ /* furigana is a nicety; never disturb the conversation */ }
+  const ps = [...el.querySelectorAll('.ja')];
+  const src = ps.map(p=>p.textContent).join('\n');
+  if(!src.trim() || !/[一-鿿]/.test(src)) return;   // no kanji, nothing to do
+  // Nothing here is on the critical path, so a slow retry costs the user nothing.
+  for(let attempt=0; attempt<4; attempt++){
+    if(attempt) await new Promise(r=>setTimeout(r, 800*attempt));
+    let got = null;
+    try{ got = await fetchReadings(key, src, ps.length); }
+    catch{ /* offline or blocked; try again */ }
+    if(got){
+      el.dataset.rubySrc = src;
+      el.dataset.rubyOut = got.join('\n');
+      applyRuby(el);
+      return;
+    }
+  }
 }
 
 function render(el, text){
@@ -233,6 +277,7 @@ function render(el, text){
     p.textContent = t;
     el.appendChild(p);
   });
+  applyRuby(el);
 }
 
 function b64ToBytes(b64){

@@ -36,6 +36,11 @@
   .dot{width:8px;height:8px;border-radius:50%;background:var(--muted);flex:none}
   .dot.live{background:var(--ok);box-shadow:0 0 0 3px color-mix(in srgb,var(--ok) 25%,transparent)}
   .dot.err{background:var(--accent)}
+  .micWrap{display:flex;align-items:center;gap:6px}
+  #micSel{max-width:170px;text-overflow:ellipsis}
+  .meter{width:44px;height:6px;border-radius:3px;background:var(--line);overflow:hidden;flex:none}
+  #micLevel{display:block;height:100%;width:0;background:var(--ok);transition:width .08s linear}
+  @media (max-width:560px){ #micSel{max-width:120px} }
   .spacer{flex:1}
   select{font:inherit;font-size:12.5px;padding:5px 8px;border-radius:7px;
     border:1px solid var(--line);background:var(--panel);color:var(--ink)}
@@ -116,6 +121,10 @@
     <option>Zephyr</option><option>Puck</option><option>Charon</option>
     <option>Kore</option><option>Fenrir</option><option>Aoede</option>
   </select>
+  <span class="micWrap" title="Which microphone to listen to">
+    <select id="micSel"><option value="">Default mic</option></select>
+    <span class="meter"><span id="micLevel"></span></span>
+  </span>
   <select id="modeSel" title="What she does with what you say">
     <option value="chat">Chat</option>
     <option value="correct">Correct me</option>
@@ -540,6 +549,57 @@ $('modeSel').onchange = ()=>{
   if(running){ stop(); setStatus('Switching mode…'); setTimeout(start, 500); }
 };
 
+/* ---- microphone choice -------------------------------------------------------
+   This machine has a dozen audio endpoints and the browser's default is often
+   not the one you are talking into. Device names are only revealed after the
+   microphone permission has been granted, so the list is filled again once a
+   stream is open.                                                            */
+let micId = '';
+try{ micId = localStorage.getItem('micId') || ''; }catch{}
+let heardAnything = false;
+
+async function listMics(){
+  if(!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return;
+  let devs = [];
+  try{ devs = await navigator.mediaDevices.enumerateDevices(); }catch{ return; }
+  const mics = devs.filter(d => d.kind === 'audioinput');
+  const sel = $('micSel');
+  sel.textContent = '';
+  const def = document.createElement('option');
+  def.value = '';
+  def.textContent = 'Default mic';
+  sel.appendChild(def);
+  mics.forEach((d, i) => {
+    if(d.deviceId === 'default' || d.deviceId === '') return;   // already covered
+    const o = document.createElement('option');
+    o.value = d.deviceId;
+    o.textContent = d.label || ('Microphone ' + (i + 1));
+    sel.appendChild(o);
+  });
+  sel.value = [...sel.options].some(o => o.value === micId) ? micId : '';
+}
+listMics();
+if(navigator.mediaDevices && navigator.mediaDevices.addEventListener)
+  navigator.mediaDevices.addEventListener('devicechange', listMics);
+
+$('micSel').onchange = ()=>{
+  micId = $('micSel').value;
+  try{ localStorage.setItem('micId', micId); }catch{}
+  if(running){ stop(); setStatus('Switching microphone…'); setTimeout(start, 500); }
+};
+
+function micConstraints(){
+  const audio = {channelCount:1, echoCancellation:true, noiseSuppression:true};
+  if(micId) audio.deviceId = {exact: micId};
+  return {audio};
+}
+
+// Small bar beside the mic list so you can see whether sound is arriving.
+const levelEl = $('micLevel');
+function paintLevel(peak){
+  levelEl.style.width = Math.min(100, Math.round(peak * 320)) + '%';
+}
+
 /* ---- replay -----------------------------------------------------------------
    Her side plays back the audio she actually sent, kept as raw PCM. Your side
    has no recording of her saying your sentence, so it is read by whatever
@@ -863,9 +923,18 @@ async function start(){
   setStatus('Connecting…');
 
   try{
-    micStream=await navigator.mediaDevices.getUserMedia({
-      audio:{channelCount:1,echoCancellation:true,noiseSuppression:true}});
-  }catch(e){ showError('Microphone blocked: '+e.message); return stop(); }
+    micStream=await navigator.mediaDevices.getUserMedia(micConstraints());
+  }catch(e){
+    if(micId && (e.name==='OverconstrainedError' || e.name==='NotFoundError')){
+      // the chosen microphone is gone; use whatever the system offers
+      micId=''; try{ localStorage.removeItem('micId'); }catch{}
+      try{ micStream=await navigator.mediaDevices.getUserMedia(micConstraints()); }
+      catch(e2){ showError('Microphone blocked: '+e2.message); return stop(); }
+      showError('That microphone is no longer available, so the default is being used.');
+    }else{ showError('Microphone blocked: '+e.message); return stop(); }
+  }
+  listMics();   // names are only revealed once permission is granted
+  heardAnything=false;
 
   playCtx=new AudioContext({sampleRate:OUT_RATE}); playHead=0;
 
@@ -956,9 +1025,13 @@ function openMic(){
   srcNode=micCtx.createMediaStreamSource(micStream);
   micNode=micCtx.createScriptProcessor(4096,1,1);
   micNode.onaudioprocess=e=>{
+    const raw=e.inputBuffer.getChannelData(0);
+    let peak=0;
+    for(let i=0;i<raw.length;i+=8){ const a=Math.abs(raw[i]); if(a>peak) peak=a; }
+    paintLevel(peak);
+    if(peak > VOICE_THRESHOLD) heardAnything=true;
     if(!ws || ws.readyState!==1) return;
 
-    const raw=e.inputBuffer.getChannelData(0);
     const f=downsampleTo16k(raw, actualRate);
     const pcm=new Int16Array(f.length);
     let sum=0;
@@ -986,6 +1059,10 @@ function openMic(){
       setStatus('Stopped — no speech for 3 minutes');
       return;
     }
+    if(!heardAnything && quiet > 8000){
+      setStatus('Not hearing anything — try another microphone in the list','err');
+      return;
+    }
     const left = Math.ceil((IDLE_STOP_MS - quiet)/60000);
     setStatus(quiet > 45000
       ? 'Listening — auto-stops in ~'+left+' min if quiet'
@@ -994,6 +1071,7 @@ function openMic(){
 }
 
 function stop(){
+  paintLevel(0);
   running=false;
   clearInterval(idleTimer); idleTimer=null;
   talkBtn.textContent='Talk';
